@@ -770,6 +770,11 @@ type BalancePart struct {
 	// credit that expires (key_balance_own.go); the GUI says in how many
 	// days, its Label then empty
 	Expires *time.Time `json:"expires,omitempty"`
+	// window is the part as a window of the key's own, when the field
+	// said when it resets (balance_window.go); balanceRead takes it out
+	// of the amounts. windowFailed is such a part that couldn't be read.
+	window       *QuotaWindow
+	windowFailed bool
 }
 
 // joinBalanceParts is the amounts on one line, as Balance tells them:
@@ -789,6 +794,9 @@ func joinBalanceParts(parts []BalancePart) string {
 // readBalanceParts is readBalancePath's amounts, each apart.
 func readBalanceParts(b []byte, path string) ([]BalancePart, error) {
 	if !strings.Contains(path, ";") && !strings.Contains(path, ":") {
+		if _, ok, err := readBalanceWindow(b, "", path); ok {
+			return nil, err // a window with no label to name it
+		}
 		v, pct, err := readBalanceOne(b, path)
 		if err != nil {
 			return nil, err
@@ -807,7 +815,17 @@ func readBalanceParts(b []byte, path string) ([]BalancePart, error) {
 			label, expr = "", part
 		}
 		label = strings.TrimSpace(label)
-		v, pct, err := readBalanceOne(b, expr)
+		w, isWindow, err := readBalanceWindow(b, label, expr)
+		if isWindow && err == nil {
+			read = true
+			out = append(out, w)
+			continue
+		}
+		var v string
+		var pct *float64
+		if !isWindow {
+			v, pct, err = readBalanceOne(b, expr)
+		}
 		if err != nil {
 			// one amount the reply hasn't (an index past the list's end, a
 			// window whose cap is 0) is "—", and the others still show
@@ -818,7 +836,7 @@ func readBalanceParts(b []byte, path string) ([]BalancePart, error) {
 			if first == nil {
 				first = err
 			}
-			out = append(out, BalancePart{Label: label, Text: "—", Error: err.Error()})
+			out = append(out, BalancePart{Label: label, Text: "—", Error: err.Error(), windowFailed: isWindow})
 			continue
 		}
 		read = true
@@ -1366,12 +1384,21 @@ func Balance(ctx context.Context, p Provider) (amount string, ok bool, err error
 		// balance to ask, as with no Balance URL
 		return "", false, nil
 	}
-	if err == nil && amount == "" && len(ws) > 0 {
-		left := ws[0].Limit - ws[0].Amount
-		for _, w := range ws[1:] {
-			left = min(left, w.Limit-w.Amount)
+	if err == nil && amount == "" {
+		// of the windows in dollars (a sub2api key's limits): a balance
+		// field's windows are shares alone, which tell no amount
+		left, any := 0.0, false
+		for _, w := range ws {
+			if w.Limit <= 0 {
+				continue
+			}
+			if l := w.Limit - w.Amount; !any || l < left {
+				left, any = l, true
+			}
 		}
-		amount = money("$", max(0, left))
+		if any {
+			amount = money("$", max(0, left))
+		}
 	}
 	return amount, ok, err
 }
@@ -1491,6 +1518,20 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts, split [
 				return "", nil, nil, ws, false, true, nil
 			}
 			return "", nil, nil, nil, false, true, err
+		}
+		// the parts that said when they reset are windows of the key's
+		// own (balance_window.go), on the card and to routing, not
+		// amounts. One that couldn't be read makes the reading unknown,
+		// so routing keeps the windows it last read rather than lose one
+		if balancePathWindows(p) {
+			for _, part := range parts {
+				if part.windowFailed {
+					return "", nil, nil, nil, false, true, errors.New(part.Error)
+				}
+			}
+			var own []QuotaWindow
+			parts, own = balanceWindows(parts)
+			ws = append(ws, own...)
 		}
 		return joinBalanceParts(parts), parts, nil, ws, balanceAccountWide(p, src, b), true, nil
 	}

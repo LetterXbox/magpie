@@ -61,7 +61,7 @@ func readsKeyWindows(p Provider) bool {
 	if p.Account != nil || p.Key == "" {
 		return false
 	}
-	if sub2APIKeyLimits(p) {
+	if sub2APIKeyLimits(p) || balancePathWindows(p) {
 		return true
 	}
 	if _, ok := planQuotaSourceOf(p); ok {
